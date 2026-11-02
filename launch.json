@@ -1,0 +1,16 @@
+{
+  "kind": "evm_contracts",
+  "contracts": [
+    {
+      "contract": "LightsOn",
+      "constructorArgs": [
+        "0x980b4424c007caf7a1f3670b48c8eaef7ebc3d44",
+        "0x5501e1fa81be1c3f49225fa7668da0245d07db60",
+        "1793022600",
+        "36",
+        "1000"
+      ]
+    }
+  ],
+  "notes": "Deploy Keep the Lights On (src/LightsOn.sol) on Sepolia (chain ID 11155111), with the accepted game rules, limits and maths unchanged. The five static ABI words encode Config in declaration order: core, sqk, genesisTime, station, startRound. SqueekCore and SQK are existing Sepolia dependencies; the walker starts after round 1000. LightsMath is internal and ISqueek.sol supplies interfaces, so only LightsOn is deployed. The game has no owner, admin, pause or upgrade mechanism. No token or pool is deployed, and no ETH funding or initialization calls are required. Settlement uses SqueekCore's certified round history."
+}
