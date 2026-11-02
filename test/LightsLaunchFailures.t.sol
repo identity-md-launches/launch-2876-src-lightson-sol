@@ -462,4 +462,98 @@ contract LightsLaunchFailuresTest is LightsLaunchFixture {
         assertEq(pay, 0);
         assertFalse(ready);
     }
+
+    // ------------------------------------------------------------ the unreadable stall counts from the last full read
+
+    /// Three pages of running rounds; the second page can't be read. The poke reads the first page and stops: that is
+    /// not a full read, so `readThrough` stays unset and the stall counts from the cursor the first page left. A bet
+    /// during the outage reads state() fine but its page fails, so it records nothing either.
+    function test_aPageThatFailsMidPokeRecordsNoRead() public {
+        core.setActiveRange(1001, 1040);
+        _to(1100);
+        vm.mockCallRevert(CORE_ADDR, abi.encodeWithSelector(MockCore.roundPage.selector, uint64(1016)), "bad page");
+        assertEq(lights.poke(4), 1, "one page came, the next failed");
+        assertEq(lights.getWalker().cursor, 1016);
+        assertEq(lights.readThrough(), 0, "a failed page is not a full read");
+        _to(1120);
+        _bet(alice, 5, 100e18);
+        assertEq(lights.readThrough(), 0, "the bet's page failed too");
+        assertEq(lights.getWalker().cursor, 1016);
+
+        _to(1016 + 145); // last ended = cursor + 144
+        assertFalse(lights.stalled());
+        vm.expectRevert(LightsOn.NotStalled.selector);
+        lights.flagStall();
+        _to(1016 + 146);
+        lights.flagStall();
+        assertTrue(lights.stallUnreadable(), "state() answers, the page does not: the unreadable kind");
+        assertEq(lights.stallMark(), 1016, "counted from the cursor, the last round actually read");
+
+        // the page is served again: the flag does not survive, and a full read records the core's settled round
+        vm.clearMockedCalls();
+        vm.warp(block.timestamp + 1 days);
+        core.setSettled(uint64(lights.currentRound() - 1));
+        lights.void();
+        assertFalse(lights.voided());
+        assertEq(lights.stallFlaggedAt(), 0);
+        lights.poke(10);
+        assertEq(lights.readThrough(), lights.currentRound() - 1);
+        assertEq(lights.getWalker().cursor, lights.currentRound() - 1);
+    }
+
+    /// The deployment is first touched long after round 1000 while the core can't be read: nothing was ever read, so
+    /// the stall counts from the start round and can be flagged at once. Any full read in the next 24 h clears it.
+    function test_aDeadCoreSeenLateIsFlaggableButAReadWithinTheDayClearsIt() public {
+        core.setReverting(true);
+        _warpRound(1300);
+        assertEq(lights.readThrough(), 0);
+        lights.flagStall();
+        assertEq(lights.stallMark(), 1000, "never read: counted from the start round");
+        uint256 flaggedAt = lights.stallFlaggedAt();
+
+        core.setReverting(false);
+        _to(1310);
+        lights.poke(1);
+        assertEq(lights.readThrough(), 1309);
+
+        core.setReverting(true);
+        vm.warp(flaggedAt + 1 days);
+        lights.void();
+        assertFalse(lights.voided(), "the core was read after the flag");
+        assertEq(lights.stallFlaggedAt(), 0, "the flag is cleared");
+        vm.expectRevert(LightsOn.NotStalled.selector);
+        lights.flagStall();
+        _warpRound(1309 + 146);
+        lights.flagStall();
+        assertEq(lights.stallMark(), 1309);
+    }
+
+    /// After a full read at any round, with the core lagging by up to 100 rounds, a dead core is a stall exactly from
+    /// the 145th round after the last round the core had settled, and not one round earlier. With more than 16
+    /// running rounds the one page asked for leaves the cursor behind: the stall still counts from the core's round.
+    function testFuzz_unreadableStallOpensAt145RoundsAfterTheLastRead(uint256 r, uint256 lag, uint256 running) public {
+        running = bound(running, 0, 60);
+        if (running != 0) core.setActiveRange(1001, uint64(1000 + running));
+        r = bound(r, 1162, 50_000);
+        lag = bound(lag, 0, 100);
+        _warpRound(r);
+        core.setSettled(uint64(r - 1 - lag));
+        lights.poke(1);
+        uint256 seen = r - 1 - lag;
+        assertEq(lights.readThrough(), seen);
+        if (running > 16) assertEq(lights.getWalker().cursor, 1016, "one page of 16 running rounds");
+        else assertEq(lights.getWalker().cursor, seen);
+        assertFalse(lights.stalled(), "a core 100 rounds behind is not a stall");
+
+        core.setReverting(true);
+        _warpRound(seen + 145);
+        assertFalse(lights.stalled());
+        vm.expectRevert(LightsOn.NotStalled.selector);
+        lights.flagStall();
+        _warpRound(seen + 146);
+        assertTrue(lights.stalled());
+        lights.flagStall();
+        assertEq(lights.stallMark(), seen);
+        assertTrue(lights.stallUnreadable());
+    }
 }

@@ -23,6 +23,9 @@ contract LaunchHandler is Test {
     uint256 public round;
     bool public down; // core reverts
     bool public frozen; // core stops settling
+    bool public pageBroken; // state() answers, roundPage replies in another shape (audit_time T2b)
+    uint256 public maxSettled; // the furthest round the core ever said it had settled
+    uint256 public lastReadThrough;
 
     mapping(address => uint256) public received; // SQK each actor got from claims
     mapping(address => uint256) public staked;
@@ -54,6 +57,7 @@ contract LaunchHandler is Test {
         uint256 t = G + (round - 1) * 600 + 100;
         if (t > block.timestamp) vm.warp(t); // chain time only moves forward
         if (!frozen) core.setSettled(uint64(round - 1));
+        if (core.settled() > maxSettled) maxSettled = core.settled();
         core.setReverting(down);
     }
 
@@ -71,6 +75,13 @@ contract LaunchHandler is Test {
             fingerprint[x] = _fp(x);
         }
         if (s > settledSeen) settledSeen = s;
+        // the last full read never goes back, and never claims a round that has not ended or that the core never
+        // said it had settled
+        uint256 rt = lights.readThrough();
+        assertGe(rt, lastReadThrough, "readThrough never goes back");
+        assertLe(rt, lights.currentRound() - 1, "readThrough never past the last ended round");
+        assertLe(rt, maxSettled, "readThrough never past what the core settled");
+        lastReadThrough = rt;
     }
 
     function _fp(uint256 x) internal view returns (bytes32) {
@@ -97,6 +108,19 @@ contract LaunchHandler is Test {
             ++round;
         }
         _enter();
+        _after();
+    }
+
+    /// A long run read with a one-page budget: the cursor stops after 16 running rounds while the core answered
+    /// further, so readThrough runs ahead of the cursor.
+    function longRun(uint8 n) external {
+        n = uint8(bound(n, 17, 40));
+        for (uint256 i; i < n; ++i) {
+            core.setActive(uint64(round), 400);
+            ++round;
+        }
+        _enter();
+        lights.poke(1);
         _after();
     }
 
@@ -128,6 +152,14 @@ contract LaunchHandler is Test {
         down = false;
         frozen = false;
         _enter();
+        _after();
+    }
+
+    /// The core's pages stop coming in a shape LightsOn can read while state() still answers, or come back.
+    function pageBreak(bool on) external {
+        pageBroken = on;
+        if (on) vm.mockCall(address(core), abi.encodeWithSelector(MockCore.roundPage.selector), bytes("not a page"));
+        else vm.clearMockedCalls();
         _after();
     }
 
@@ -226,8 +258,27 @@ contract LaunchHandler is Test {
         _after();
     }
 
+    /// readThrough moves only when the core answered and nothing failed, and then to exactly the last round that
+    /// has both ended and been settled by the core.
     function poke(uint8 pages) external {
-        lights.poke(bound(pages, 0, 4));
+        uint256 rt = lights.readThrough();
+        uint256 cursor = lights.getWalker().cursor;
+        uint256 n = bound(pages, 0, 4);
+        uint256 read = lights.poke(n);
+        uint256 rt2 = lights.readThrough();
+        uint256 through = lights.currentRound() - 1;
+        if (core.settled() < through) through = core.settled();
+        if (down || lights.voided()) {
+            assertEq(read, 0);
+            assertEq(rt2, rt, "a core that can't be answered is not a read");
+        } else if (pageBroken) {
+            assertEq(read, 0, "no page can be read");
+            if (cursor < through) assertEq(rt2, rt, "a failed page is not a read");
+        }
+        if (rt2 != rt) {
+            assertEq(rt2, through, "a full read records what the core settled");
+            if (lights.getWalker().cursor < through) assertEq(read, n, "a partial read took every page asked for");
+        }
         _after();
     }
 
@@ -305,11 +356,17 @@ contract LaunchHandler is Test {
         bool v = lights.voided();
         bool s = v ? false : lights.stalled();
         uint256 at = lights.stallFlaggedAt();
+        uint256 seen = lights.readThrough();
+        if (seen < lights.getWalker().cursor) seen = lights.getWalker().cursor;
         try lights.flagStall() {
             assertFalse(v);
             assertTrue(s, "flagged only while stalled");
             if (at == 0) {
                 assertEq(lights.stallFlaggedAt(), block.timestamp);
+                if (lights.stallUnreadable()) {
+                    assertEq(lights.stallMark(), seen, "unreadable: counted from the last full read or the cursor");
+                    assertGt(lights.currentRound() - 1, seen + 144, "and only 145 rounds after it");
+                }
                 ++flags;
             } else {
                 assertEq(lights.stallFlaggedAt(), at, "an existing flag is kept");
@@ -497,9 +554,12 @@ contract LightsLaunchInvariantTest is LightsLaunchFixture {
     function afterInvariant() public {
         sqk.setBurnReverts(false);
         sqk.setDeadTransferFails(false);
+        vm.clearMockedCalls();
         for (uint256 tries; tries < 4 && !lights.voided(); ++tries) {
             core.setReverting(true);
-            uint256 r = uint256(lights.getWalker().cursor) + 146;
+            uint256 seen = lights.readThrough();
+            if (seen < lights.getWalker().cursor) seen = lights.getWalker().cursor;
+            uint256 r = seen + 146;
             if (lights.currentRound() < r) _warpRound(r);
             lights.settle(type(uint256).max);
             if (lights.stallFlaggedAt() == 0) lights.flagStall();
