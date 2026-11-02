@@ -27,8 +27,9 @@ that is simply refunded. The full rules, with the exact maths, are in [RULES.md]
 
 ## How it's connected to the real hamster
 
-Squeektoshi's wheel has a sensor. Every 10 minutes Squeekchain records how far he ran in `SqueekCore` on Sepolia,
-where nobody can change it. The game contract reads those records with `roundPage` and walks through them: running
+Squeektoshi's wheel has a sensor. Every 10 minutes Squeekchain records how far he ran in `SqueekCore` on Sepolia.
+SqueekCore is an upgradeable proxy: the game trusts its administrator to keep serving faithful round records.
+The game contract reads those records with `roundPage` and walks through them: running
 rounds light bulbs, and quiet rounds flicker them or cause a blackout. The hamster cam at the top of the page shows his
 speed right now, from Squeekchain's public status API. It can run a few minutes ahead of the records, which are what
 count.
@@ -78,12 +79,40 @@ node site/test/e2e.test.mjs
 | Rehearsal practice token | `0xfC812E27a816e083b3313b6DECDF15dEa9d8896e` |
 | The real game | not deployed yet |
 
+## Launch configuration
+
+This contracts-only launch deploys `LightsOn` on Sepolia (chain ID `11155111`) using its existing nonpayable
+`constructor(Config memory cfg)`. The fields, in declaration order, are:
+
+| Field | Type | Value |
+|---|---|---|
+| `core` | `address` | `0x980b4424c007caf7a1f3670b48c8eaef7ebc3d44` |
+| `sqk` | `address` | `0x5501e1fa81be1c3f49225fa7668da0245d07db60` |
+| `genesisTime` | `uint256` | `1793022600` |
+| `station` | `uint256` | `36` |
+| `startRound` | `uint32` | `1000` |
+
+All five fields are static, so encoding the struct produces the same 160 bytes as encoding the five plain
+arguments in this order. The factory appends those bytes to `LightsOn`'s creation bytecode and deploys with zero
+ETH. No initialization call is needed, and construction does not call either dependency. `LightsMath` is internal
+library code included in the game; `ISqueek.sol` declares interfaces. Only `LightsOn` is deployed: no new token,
+pool or owner role is added, and bets use the existing SQK above.
+
+The walker begins **after round 1000**, even if deployment happens later. Rounds 999 and 1000 must both be quiet;
+this was confirmed on Sepolia at block `12048326`. The existing rules handle subsequent rounds from 1001 onward.
+The deployment service supplies the confirmed game address after launch. See [ADAPTATION.md](ADAPTATION.md) for
+the factory rehearsal, audit disposition and verification results.
+
 ## Safety
 
 The contract has no owner, no admin, no pause, no proxy and no setters. If SqueekCore stops recording for a day and
 stays stuck, or he hasn't run at all for 7 days, anyone can end the game. Rides that already ended still pay as they
 ended. Every other bet is refunded, including bets in an unwon bonus pot, so no bet can get stuck. Winnings never
 expire.
+
+An unreadable or stalled SqueekCore is covered by those safety valves. Well-formed but false round records from
+an upgraded SqueekCore cannot be detected by the game; its immutable core address does not make that dependency
+immutable.
 
 This is a test-network game. Test SQK has no money value, and 2% of what winners take from others is burned. Nothing
 in the game wakes him or rewards running faster. Naps are good.
