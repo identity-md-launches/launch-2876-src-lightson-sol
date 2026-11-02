@@ -95,6 +95,7 @@ contract LightsOn {
     uint256 public stallMark; // last round the core was known to have settled when the flag went up
     bool public voided;
     bool public stallUnreadable; // the flag went up while the core could not be read (else: it was behind)
+    uint32 public readThrough; // last round the core had settled when the walker last read it without a failure
     uint256 public unburned; // only if both burn and the 0xdEaD transfer failed
     uint256 private _lock = 1;
 
@@ -253,9 +254,13 @@ contract LightsOn {
         if (settledThrough < through) through = settledThrough;
 
         Walker memory w = walker;
+        bool failed;
         while (pages < maxPages && w.cursor < through) {
             (bool pageOk, uint256 cert, uint256[] memory ids) = _readPage(w.cursor, through);
-            if (!pageOk) break;
+            if (!pageOk) {
+                failed = true;
+                break;
+            }
             uint256 prev = w.cursor;
             for (uint256 i; i < ids.length; ++i) {
                 uint256 id = ids[i];
@@ -269,6 +274,9 @@ contract LightsOn {
         }
         walker = w;
         behind = w.cursor < through;
+        // The core was read without a failure: nothing was left to read, or every page asked for came. The stall
+        // check of the unreadable kind counts from here, not from a cursor that a page budget left behind.
+        if (!failed && (pages != 0 || !behind) && through > readThrough) readThrough = uint32(through);
     }
 
     /// Quiet rounds: one is a break, two in a row are the blackout (C = the first). A night ends at its STATION
@@ -484,7 +492,8 @@ contract LightsOn {
     }
 
     /// `mark` = the last round the core is known to have settled: its own answer if it can be read, else the last
-    /// round the walker read. `walkFirst` = the core can still serve rounds the walker has not read.
+    /// round it had settled when the walker last read it without a failure (`readThrough`, or the cursor if that is
+    /// further). `walkFirst` = the core can still serve rounds the walker has not read.
     /// `unreadable` = the core could not be read just now (a revert, a bad page, a reply in another shape, no code).
     function _stall() internal view returns (bool, uint256 mark, bool walkFirst, bool unreadable) {
         if (gasleft() < STALL_GAS) revert NeedMoreGas();
@@ -497,7 +506,9 @@ contract LightsOn {
             if (!readable) (readable,,) = _readPage(c, through);
             if (readable) return (ended > settledThrough + STALL_ROUNDS, settledThrough, through > c, false);
         }
-        return (ended > c + STALL_ROUNDS, c, false, true);
+        uint256 seen = readThrough;
+        if (seen < c) seen = c;
+        return (ended > seen + STALL_ROUNDS, seen, false, true);
     }
 
     function flagStall() external {

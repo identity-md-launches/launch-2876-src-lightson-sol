@@ -110,7 +110,10 @@ stays stuck, or he hasn't run at all for 7 days, anyone can end the game. Rides 
 ended. Every other bet is refunded, including bets in an unwon bonus pot, so no bet can get stuck. Winnings never
 expire.
 
-An unreadable or stalled SqueekCore is covered by those safety valves. Well-formed but false round records from
+An unreadable or stalled SqueekCore is covered by those safety valves. A SqueekCore that can't be read counts as
+stalled 144 rounds after the last round the game read it without a failure (`readThrough`), and any successful
+read in the 24 hours after a flag clears the flag; a game nobody calls can only judge the core by what it last saw.
+Well-formed but false round records from
 an upgraded SqueekCore cannot be detected by the game; its immutable core address does not make that dependency
 immutable.
 
